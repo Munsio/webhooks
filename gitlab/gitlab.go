@@ -17,6 +17,7 @@ var (
 	ErrGitLabTokenVerificationFailed = errors.New("X-Gitlab-Token validation failed")
 	ErrEventNotFound                 = errors.New("event not defined to be parsed")
 	ErrParsingPayload                = errors.New("error parsing payload")
+	ErrParsingSystemPayload          = errors.New("error parsing system payload")
 	// ErrHMACVerificationFailed    = errors.New("HMAC verification failed")
 )
 
@@ -31,6 +32,11 @@ const (
 	WikiPageEvents           Event = "Wiki Page Hook"
 	PipelineEvents           Event = "Pipeline Hook"
 	BuildEvents              Event = "Build Hook"
+	SystemHooks              Event = "System Hook"
+
+	objectPush         string = "push"
+	objectTag          string = "tag_push"
+	objectMergeRequest string = "merge_request"
 )
 
 // Option is a configuration option for the webhook
@@ -55,7 +61,7 @@ type Webhook struct {
 	secret string
 }
 
-// Event defines a GitHub hook event type
+// Event defines a GitLab hook event type by the X-Gitlab-Event Header
 type Event string
 
 // New creates and returns a WebHook instance denoted by the Provider type
@@ -76,6 +82,9 @@ func (hook Webhook) Parse(r *http.Request, events ...Event) (interface{}, error)
 		_ = r.Body.Close()
 	}()
 
+	var err error
+	var payload []byte
+
 	if len(events) == 0 {
 		return nil, ErrEventNotSpecifiedToParse
 	}
@@ -90,6 +99,29 @@ func (hook Webhook) Parse(r *http.Request, events ...Event) (interface{}, error)
 
 	gitLabEvent := Event(event)
 
+	if gitLabEvent == SystemHooks {
+
+		payload, err = ioutil.ReadAll(r.Body)
+		if err != nil || len(payload) == 0 {
+			return nil, ErrParsingSystemPayload
+		}
+
+		var sysPl SystemHookPayload
+		err = json.Unmarshal([]byte(payload), &sysPl)
+		if err != nil {
+			return nil, err
+		}
+
+		switch sysPl.ObjectKind {
+		case objectPush:
+			gitLabEvent = PushEvents
+		case objectTag:
+			gitLabEvent = TagEvents
+		case objectMergeRequest:
+			gitLabEvent = MergeRequestEvents
+		}
+	}
+
 	var found bool
 	for _, evt := range events {
 		if evt == gitLabEvent {
@@ -102,9 +134,12 @@ func (hook Webhook) Parse(r *http.Request, events ...Event) (interface{}, error)
 		return nil, ErrEventNotFound
 	}
 
-	payload, err := ioutil.ReadAll(r.Body)
-	if err != nil || len(payload) == 0 {
-		return nil, ErrParsingPayload
+	// check if payload is empty - that means it was no system hook call
+	if len(payload) == 0 {
+		payload, err = ioutil.ReadAll(r.Body)
+		if err != nil || len(payload) == 0 {
+			return nil, ErrParsingPayload
+		}
 	}
 
 	// If we have a Secret set, we should check the MAC
